@@ -1,0 +1,242 @@
+name: Grade Lab 1
+
+on:
+  push:
+    paths:
+      - "lab1/**.cpp"
+  workflow_dispatch:
+
+jobs:
+  grade:
+    name: Auto-Grade Lab 1
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install G++
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y g++
+
+      - name: Check lab1 folder
+        run: |
+          if [ ! -d "lab1" ]; then
+            echo "::error::The lab1/ folder does not exist."
+            exit 1
+          fi
+          echo "lab1/ found. Contents:"
+          ls -la lab1/
+
+      - name: Set up test cases
+        run: |
+          mkdir -p lab1/tests/assignment1 lab1/tests/assignment2 \
+                   lab1/tests/assignment3 lab1/tests/assignment4 \
+                   lab1/tests/assignment5
+
+          touch lab1/tests/assignment1/input1.txt
+          echo "__MULTILINE_MIN2__" > lab1/tests/assignment1/expected1.txt
+
+          touch lab1/tests/assignment2/input1.txt
+          printf '*\n**\n***\n' > lab1/tests/assignment2/expected1.txt
+
+          touch lab1/tests/assignment3/input1.txt
+          echo "__MULTILINE_MIN3__" > lab1/tests/assignment3/expected1.txt
+
+          touch lab1/tests/assignment4/input1.txt
+          echo "__MULTILINE_MIN3__" > lab1/tests/assignment4/expected1.txt
+
+          touch lab1/tests/assignment5/input1.txt
+          echo "__CONTAINS__Hello World" > lab1/tests/assignment5/expected1.txt
+
+      - name: Set up grading script
+        run: |
+          mkdir -p scripts
+          cat > scripts/grade_lab.py << 'PYEOF'
+          import argparse, os, subprocess, sys
+          from pathlib import Path
+          from datetime import datetime, timezone
+
+          COMPILE_POINTS = 8
+          TEST_POINTS    = 12
+          RUN_TIMEOUT    = 10
+          COMPILE_TIMEOUT= 30
+
+          DESCRIPTIONS = {
+              1: {
+                  1: "Print your full name on line 1 and your department on line 2",
+                  2: "Print a star triangle: *, **, *** on separate lines",
+                  3: "Print your name, the current year, and your matric number (3 lines)",
+                  4: "Print a self-introduction of at least 3 lines",
+                  5: "Fix the buggy code so it prints Hello World correctly",
+              }
+          }
+
+          def compile_cpp(source, binary):
+              r = subprocess.run(["g++","-std=c++17","-Wall","-o",str(binary),str(source)],
+                  capture_output=True, text=True, timeout=COMPILE_TIMEOUT)
+              if r.returncode == 0:
+                  msg = "Compiled successfully"
+                  if r.stderr.strip(): msg += f" (warnings):\n{r.stderr.strip()}"
+                  return True, msg
+              return False, r.stderr.strip()
+
+          def run_binary(binary, input_file):
+              try:
+                  inp = open(input_file).read()
+                  r = subprocess.run([str(binary)], input=inp, capture_output=True,
+                      text=True, timeout=RUN_TIMEOUT)
+                  return True, r.stdout
+              except subprocess.TimeoutExpired:
+                  return False, "TIMEOUT: possible infinite loop"
+              except Exception as e:
+                  return False, f"RUNTIME ERROR: {e}"
+
+          def match_output(actual, expected_file):
+              exp = expected_file.read_text().strip()
+              if exp.startswith("__MULTILINE_MIN"):
+                  n = int(exp.replace("__MULTILINE_MIN","").replace("__",""))
+                  non_empty = [l for l in actual.splitlines() if l.strip()]
+                  if len(non_empty) >= n:
+                      return True, f"Output has {len(non_empty)} non-empty lines (min required: {n})"
+                  return False, f"Only {len(non_empty)} non-empty line(s); need at least {n}"
+              if exp.startswith("__CONTAINS__"):
+                  needle = exp.replace("__CONTAINS__","").strip()
+                  if needle.lower() in actual.lower():
+                      return True, f"Output contains required text: '{needle}'"
+                  return False, f"Output does not contain: '{needle}'"
+              al = [l.rstrip() for l in actual.strip().splitlines()]
+              el = [l.rstrip() for l in exp.splitlines()]
+              if al == el: return True, "Output matches expected exactly"
+              diffs = []
+              for i in range(max(len(al), len(el))):
+                  a = al[i] if i < len(al) else "<missing>"
+                  e = el[i] if i < len(el) else "<extra>"
+                  diffs.append(f"  Line {i+1}: expected {repr(e)}, got {repr(a)}")
+              return False, "Mismatch:\n" + "\n".join(diffs)
+
+          def grade_assignment(lab, assignment, lab_dir):
+              source   = lab_dir / f"assignment{assignment}.cpp"
+              binary   = lab_dir / f"assignment{assignment}.out"
+              test_dir = lab_dir / "tests" / f"assignment{assignment}"
+              desc     = DESCRIPTIONS.get(lab,{}).get(assignment, f"Assignment {assignment}")
+              result   = {"assignment":assignment,"description":desc,"found":source.exists(),
+                          "compiled":False,"compile_msg":"","tests":[],"points":0,"max_points":20}
+              if not result["found"]:
+                  result["compile_msg"] = f"File not found: lab{lab}/assignment{assignment}.cpp"
+                  return result
+              try:
+                  ok, msg = compile_cpp(source, binary)
+              except subprocess.TimeoutExpired:
+                  result["compile_msg"] = "TIMEOUT during compilation"
+                  return result
+              result["compiled"] = ok
+              result["compile_msg"] = msg
+              if not ok: return result
+              result["points"] += COMPILE_POINTS
+              inputs = sorted(test_dir.glob("input*.txt")) if test_dir.exists() else []
+              if not inputs:
+                  result["tests"].append({"name":"test1","passed":False,"detail":"No test inputs found"})
+                  return result
+              pts_each = TEST_POINTS / len(inputs)
+              for inp in inputs:
+                  tname = inp.stem.replace("input","test")
+                  exp_f = test_dir / inp.name.replace("input","expected")
+                  if not exp_f.exists():
+                      result["tests"].append({"name":tname,"passed":False,"detail":"Missing expected file"})
+                      continue
+                  ok2, stdout = run_binary(binary, inp)
+                  if not ok2:
+                      result["tests"].append({"name":tname,"passed":False,"detail":stdout})
+                      continue
+                  passed, detail = match_output(stdout, exp_f)
+                  result["tests"].append({"name":tname,"passed":passed,"detail":detail})
+                  if passed: result["points"] += pts_each
+              if binary.exists(): binary.unlink()
+              return result
+
+          def build_md(lab, results, total, max_total):
+              now   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+              pct   = round((total/max_total)*100) if max_total else 0
+              grade = "A" if pct>=70 else "B" if pct>=60 else "C" if pct>=50 else "D" if pct>=45 else "F"
+              lines = [f"# Lab {lab} Auto-Grade Report","",
+                       f"**Graded:** {now}  ",
+                       f"**Total Score:** {total} / {max_total} ({pct}%)  ",
+                       f"**Grade:** {grade}","","---",""]
+              for r in results:
+                  pts   = r["points"]; mp = r["max_points"]
+                  emoji = "✅" if pts==mp else ("⚠️" if pts>0 else "❌")
+                  lines += [f"## {emoji} Assignment {r['assignment']} ({pts:.0f} / {mp} marks)",
+                             f"**Task:** {r['description']}",""]
+                  if not r["found"]:
+                      lines += [f"> File not submitted: `lab{lab}/assignment{r['assignment']}.cpp`",""]
+                      continue
+                  ci = "✅" if r["compiled"] else "❌"
+                  lines += [f"**Compilation:** {ci} {r['compile_msg']}",""]
+                  if not r["compiled"]:
+                      lines += ["```",r["compile_msg"],"```","","> Fix the error and push again.",""]
+                      continue
+                  if r["tests"]:
+                      lines.append("**Test Results:**"); lines.append("")
+                      for t in r["tests"]:
+                          ti = "✅" if t["passed"] else "❌"
+                          lines.append(f"- {ti} `{t['name']}`: {t['detail']}")
+                      lines.append("")
+                  lines.append("---"); lines.append("")
+              lines += ["## Summary","",
+                        "| Assignment | Score | Status |",
+                        "|------------|-------|--------|"]
+              for r in results:
+                  st = "Pass" if r["points"]==r["max_points"] else ("Partial" if r["points"]>0 else "Fail / Not submitted")
+                  lines.append(f"| Assignment {r['assignment']} | {r['points']:.0f} / {r['max_points']} | {st} |")
+              lines += [f"| **TOTAL** | **{total} / {max_total}** | **{grade} ({pct}%)** |","",
+                        "> This report is generated automatically. Push a corrected file to update your score."]
+              return "\n".join(lines)
+
+          def main():
+              parser = argparse.ArgumentParser()
+              parser.add_argument("--lab", type=int, required=True)
+              args    = parser.parse_args()
+              lab     = args.lab
+              lab_dir = Path(f"lab{lab}")
+              if not lab_dir.exists():
+                  print(f"ERROR: lab{lab}/ not found", file=sys.stderr); sys.exit(1)
+              results=[]; total=0; max_total=0
+              for i in range(1,6):
+                  r = grade_assignment(lab, i, lab_dir)
+                  results.append(r); total+=r["points"]; max_total+=r["max_points"]
+                  print(f"  assignment{i}: {'OK' if r['compiled'] else 'FAIL':<6} {r['points']:.0f}/{r['max_points']}")
+              md = build_md(lab, results, int(total), max_total)
+              Path("RESULT.md").write_text(md)
+              sf = os.environ.get("GITHUB_STEP_SUMMARY")
+              if sf: open(sf,"a").write(md)
+              print(f"\nTOTAL: {total:.0f}/{max_total}")
+              if total < max_total: sys.exit(1)
+
+          if __name__ == "__main__":
+              main()
+          PYEOF
+
+      - name: Run grader
+        run: python3 scripts/grade_lab.py --lab 1
+        continue-on-error: true
+
+      - name: Commit RESULT.md
+        run: |
+          git config user.name  "Lab Grader Bot"
+          git config user.email "grader-bot@noreply.github.com"
+          git add RESULT.md
+          if git diff --staged --quiet; then
+            echo "No changes to RESULT.md"
+          else
+            git commit -m "Auto-grade: Lab 1 results [skip ci]"
+            git push
+          fi
+
+      - name: Show result
+        run: cat RESULT.md
