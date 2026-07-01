@@ -1,6 +1,6 @@
 # Lab 1 Auto-Grade Report
 
-**Graded:** 2026-06-30 23:47 UTC  
+**Graded:** 2026-07-01 00:39 UTC  
 **Total Score:** 40 / 100 (40%)  
 **Grade:** F
 
@@ -13,7 +13,7 @@
 
 **Test Results:**
 
-- ✅ `test1`: Output has 2 non-empty lines (minimum required: 2)
+- ✅ `test1`: Output has 2 non-empty lines (min required: 2)
 
 ---
 
